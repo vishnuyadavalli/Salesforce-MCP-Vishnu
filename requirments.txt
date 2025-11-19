@@ -1,0 +1,13 @@
+mcp
+fastmcp
+uvicorn
+starlette
+python-dotenv
+simple-salesforce
+langchain-openai
+langgraph
+httpx
+requests
+cryptography
+pyjwt
+click
