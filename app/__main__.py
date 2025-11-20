@@ -26,9 +26,9 @@ except Exception as e:
 @click.command()
 def main():
     """Local runner for the MCP server."""
-    print("\n--- STARTING SERVER (Default Port 8000) ---")
-    print("The server will pick a default port (usually 8000).")
-    print("Check the logs below for: 'Uvicorn running on http://0.0.0.0:8000'")
+    print("\n--- STARTING SERVER (Default Port 8012) ---")
+    print("The server will pick a default port (usually 8012).")
+    print("Check the logs below for: 'Uvicorn running on http://0.0.0.0:8012'")
     
     # CORRECTED: Call run() without host/port arguments
     # This avoids the TypeError you were seeing.

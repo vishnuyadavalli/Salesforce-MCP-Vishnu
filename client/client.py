@@ -5,12 +5,12 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from llm import get_llm
 
-# Configure the client to connect to localhost:8000
+# Configure the client to connect to localhost:8012
 mcp_client = MultiServerMCPClient(
     {
         "salesforce_mcp_server": {
             "transport": "sse",
-            "url": "http://localhost:8000/sse"  # Updated to default port 8000
+            "url": "http://localhost:8000/sse"  # Updated to default port 8012
         }
     }
 )
