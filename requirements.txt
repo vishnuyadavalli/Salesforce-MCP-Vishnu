@@ -11,3 +11,5 @@ requests
 cryptography
 pyjwt
 click
+langchain_mcp_adapters
+langchain

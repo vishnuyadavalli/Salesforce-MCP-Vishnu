@@ -3,105 +3,12 @@ from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
-import json
-import requests
-import os
-import base64
-import time
 import jwt
 from jwt import InvalidTokenError
 
-from JwksCache import JwksCache
-from properties import JWKS_URI, AUDIENCE, ISSUER, CIRCUIT_CLIENT_ID
-
-log = logging.getLogger(__name__)
-
-CLOCK_SKEW_LEEWAY = 10
-ALGORITHMS = ["RS256"]
-
-_jwks_cache = JwksCache(JWKS_URI)
-
-
-# ------------------------------------------------------------------------------
-# Public key builder from JWK (supports RSA and EC)
-# ------------------------------------------------------------------------------
-def _public_key_from_jwk(jwk: dict):
-    """
-    Build a public key object from a JWK. Supports RSA and EC.
-    """
-    kty = jwk.get("kty")
-    if kty == "RSA":
-        return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
-
-    if kty == "EC":
-        return jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(jwk))
-    raise ValueError(f"Unsupported key type: {kty}")
-
-
-# ------------------------------------------------------------------------------
-# Token verification
-# ------------------------------------------------------------------------------
-def verify_token(token: str) -> bool:
-    """
-    Local JWT validation with JWKS. Returns True if token is valid and intended for this agent.
-    - Verifies signature.
-    - Checks iss, aud, exp, nbf.
-    """
-    try:
-        header = jwt.get_unverified_header(token)
-    except InvalidTokenError:
-        log.warning("Invalid token header")
-        return False
-
-    kid = header.get("kid")
-    if not kid:
-        log.warning("Missing kid in token header")
-        return False
-
-    jwk = _jwks_cache.get_jwk(kid)
-    if not jwk:
-        log.warning("Unknown signing key (kid=%s)", kid)
-        return False
-
-    try:
-        public_key = _public_key_from_jwk(jwk)
-        # aud and exp validation happen inside jwt.decode:
-        # - audience=AUDIENCE sets expected aud (aud claim must match).
-        # - options.verify_exp=True enforces exp claim (not expired).
-        # - options.verify_aud=True enables the aud check.
-        payload = jwt.decode(
-            token,
-            public_key,
-            algorithms=ALGORITHMS,
-            audience=AUDIENCE,           # aud validated against this value
-            issuer=ISSUER,               # iss must match this value
-            options={
-                "require": ["exp", "iss", "aud"],
-                "verify_signature": True,
-                "verify_exp": True,      # exp validation enabled
-                "verify_nbf": True,      # nbf validation enabled
-                "verify_iss": True,      # iss validation enabled
-                "verify_aud": True,      # aud validation enabled
-            },
-            leeway=CLOCK_SKEW_LEEWAY,    # small clock skew tolerance (seconds)
-        )
-        
-        if "cid" in payload:
-            # Optional: validate 'cid' claim if needed
-            if payload["cid"] in CIRCUIT_CLIENT_ID:
-                return True
-        else:
-            log.warning("Token cid does not match expected client ID")
-            return False
-            
-        return True
-        
-    except InvalidTokenError as e:
-        log.warning("Token validation failed: %s", e)
-        return False
-    except Exception as e:
-        log.warning("Token verification error: %s", e)
-        return False
+# Configure logging to show our debug messages
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("middleware")
 
 class OAuth2Middleware(BaseHTTPMiddleware):
     """Starlette middleware that authenticates A2A access using an OAuth2 bearer token."""
@@ -112,77 +19,46 @@ class OAuth2Middleware(BaseHTTPMiddleware):
         public_paths: list[str] = None,
     ):
         super().__init__(app)
+        # Force these paths to be public for local testing
         self.public_paths = set(public_paths or [])
+        self.public_paths.add("/sse")
+        self.public_paths.add("/messages")
+        
+        log.info(f"--- MIDDLEWARE INITIALIZED ---")
+        log.info(f"Allowed Public Paths: {self.public_paths}")
 
     async def dispatch(self, request: Request, call_next):
         """
-        Middleware to authenticate requests using OAuth2 bearer tokens.
+        Middleware to authenticate requests.
         """
         path = request.url.path
         
-        # Option 3: Bypass auth & logging entirely for health/readiness probes
+        # --- DEBUG LOG ---
+        log.info(f"Incoming Request -> Path: {path} | Method: {request.method}")
+        # -----------------
+
+        # 1. Bypass Health Checks
         if path in ('/healthz', '/readyz'):
             return await call_next(request)
-            
-        # Log headers for debugging (optional)
-        # for header_name, header_value in request.headers.items():
-        #     print(f"{header_name}: {header_value}")
 
-        # Allow public paths and anonymous access
+        # 2. Bypass Public Paths (SSE, Messages)
         if path in self.public_paths:
+            log.info(f"✅ ALLOWING public path: {path}")
             return await call_next(request)
 
-        # Authenticate the request
-        # Uncomment the following block to enable strict JWT validation
+        # 3. Auth Logic (Commented out for local debugging to prevent 401s)
+        # If you still get 401s, something else in your stack is throwing them.
         
         # auth_header = request.headers.get('Authorization')
-        # if not auth_header or not auth_header.startswith('Bearer '):
-        #     log.warning('Missing or malformed Authorization header: %s', auth_header)
-        #     return self._unauthorized(
-        #         'Missing or malformed Authorization header.', request
-        #     )
-        # 
-        # access_token = auth_header.split('Bearer ')[1]
-        # 
-        # try:
-        #     is_valid = verify_token(access_token)
-        #     if not is_valid:
-        #         log.warning(f'Invalid or expired access token : {auth_header}',)
-        #         return self._unauthorized(
-        #             'Invalid or expired access token.', request
-        #         )
-        # except Exception as e:
-        #     log.error('Dispatch error: %s', e, exc_info=True)
-        #     return self._forbidden(f'Authentication failed: {e}', request)
-
+        # if not auth_header:
+        #      log.warning(f"⛔ BLOCKED: No Auth Header for {path}")
+        #      return self._unauthorized("Missing Authorization Header", request)
+        
+        # For now, allow everything else too
+        log.info(f"⚠️ ALLOWING unknown path (Debug Mode): {path}")
         return await call_next(request)
 
-    def _forbidden(self, reason: str, request: Request):
-        """
-        Returns a 403 Forbidden response with a reason.
-        """
-        accept_header = request.headers.get('accept', '')
-        if 'text/event-stream' in accept_header:
-            return PlainTextResponse(
-                f'error forbidden: {reason}',
-                status_code=403,
-                media_type='text/event-stream',
-            )
-        return JSONResponse(
-            {'error': 'forbidden', 'reason': reason}, status_code=403
-        )
-
     def _unauthorized(self, reason: str, request: Request):
-        """
-        Returns a 401 Unauthorized response with a reason.
-        """
-        accept_header = request.headers.get('accept', '')
-        if 'text/event-stream' in accept_header:
-            return PlainTextResponse(
-                f'error unauthorized: {reason}',
-                status_code=401,
-                media_type='text/event-stream',
-            )
         return JSONResponse(
             {'error': 'unauthorized', 'reason': reason}, status_code=401
         )
