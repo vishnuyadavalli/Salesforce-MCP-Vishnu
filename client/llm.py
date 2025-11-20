@@ -68,5 +68,6 @@ def get_llm():
         default_headers={'client-id': CIRCUIT_LLM_API_CLIENT_ID},
         model_kwargs={'user': f'{{"appkey": "{CIRCUIT_LLM_API_APP_KEY}"}}'},
         temperature=0,
-        streaming=True
+        streaming=True,
+        deployment_name = 'gpt-4.1'
     )

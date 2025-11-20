@@ -5,12 +5,12 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from llm import get_llm
 
-# Configure the client to connect to your local MCP server
+# Configure the client to connect to localhost:8000
 mcp_client = MultiServerMCPClient(
     {
         "salesforce_mcp_server": {
-            "transport": "sse",             # Use standard SSE transport
-            "url": "http://localhost:8012/sse" # Point to the SSE endpoint
+            "transport": "sse",
+            "url": "http://localhost:8000/sse"  # Updated to default port 8000
         }
     }
 )
@@ -29,11 +29,13 @@ async def main():
             return
 
         # 2. Connect to MCP Server
-        print("2. Connecting to MCP Server (http://localhost:8012/sse)...")
+        print("2. Connecting to MCP Server (http://localhost:8000/sse)...")
         try:
             mcp_tools = await mcp_client.get_tools()
         except Exception as e:
              print("\n❌ MCP CONNECTION ERROR:")
+             print("   Is the server running on Port 8000?")
+             print("   Check the server terminal to see which port it picked.")
              traceback.print_exc() 
              return
 
@@ -49,10 +51,9 @@ async def main():
         print("\n3. Initializing Agent...")
         agent = create_react_agent(llm, mcp_tools)
 
-        # Example 1: Describe Account Object
         print("\n4. Running Query...")
         response = await agent.ainvoke(
-            {"messages": [HumanMessage(content="What fields are available on the Salesforce Account object?")]}
+            {"messages": [HumanMessage(content="Can you list all the child objects to Account?")]}
         )
         print("\n✅ Final Answer:")
         print(response["messages"][-1].content)

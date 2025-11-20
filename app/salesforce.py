@@ -1,6 +1,18 @@
-from typing import Any, List, Dict
+import sys
+import os
+import logging
+
+# Configure logging to print to the server console
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("salesforce_tools")
+
+# --- PATH FIX ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+# ----------------
+
 from simple_salesforce import Salesforce
-from fastmcp_instantiator import mcp_application
 from properties import (
     SALESFORCE_USERNAME, 
     SALESFORCE_PASSWORD, 
@@ -8,88 +20,71 @@ from properties import (
     SALESFORCE_DOMAIN
 )
 
+# CRITICAL IMPORT
+try:
+    from server_instance import mcp_application
+except ImportError:
+    print("❌ IMPORT ERROR: Could not import 'mcp_application' from 'server_instance'.")
+    raise
+
 def get_salesforce_client() -> Salesforce:
     """Helper to establish a Salesforce connection."""
-    # If domain is provided (e.g., 'test' for sandbox), pass it, otherwise default to login.salesforce.com
-    kwargs = {
-        'username': SALESFORCE_USERNAME,
-        'password': SALESFORCE_PASSWORD,
-        'security_token': SALESFORCE_SECURITY_TOKEN,
-    }
-    if SALESFORCE_DOMAIN:
-        kwargs['domain'] = SALESFORCE_DOMAIN
-        
-    return Salesforce(**kwargs)
+    logger.info("🔌 Connecting to Salesforce...")
+    try:
+        kwargs = {
+            'username': SALESFORCE_USERNAME,
+            'password': SALESFORCE_PASSWORD,
+            'security_token': SALESFORCE_SECURITY_TOKEN,
+        }
+        if SALESFORCE_DOMAIN:
+            kwargs['domain'] = SALESFORCE_DOMAIN
+            
+        sf = Salesforce(**kwargs)
+        logger.info("✅ Salesforce Connection Established.")
+        return sf
+    except Exception as e:
+        logger.error(f"❌ Salesforce Connection Failed: {e}")
+        raise e
 
 @mcp_application.tool()
 def execute_soql_query(query: str) -> str:
-    """
-    Execute a SOQL (Salesforce Object Query Language) query.
-    Use this to find records, e.g., "SELECT Id, Name, Industry FROM Account LIMIT 5".
-    
-    Args:
-        query: The full SOQL query string.
-    """
+    """Execute a SOQL query."""
+    logger.info(f"🔍 TOOL CALL: execute_soql_query -> {query}")
     try:
         sf = get_salesforce_client()
         results = sf.query(query)
         
         records = results.get('records', [])
+        logger.info(f"   Found {len(records)} records.")
+        
         if not records:
             return "Query executed successfully but returned no records."
-            
-        # Format results simply for the LLM
+        
         formatted_results = []
         for rec in records:
-            # Remove attributes metadata to save tokens
             rec.pop('attributes', None)
             formatted_results.append(str(rec))
             
         return f"Found {results['totalSize']} records. Showing first {len(records)}:\n" + "\n---\n".join(formatted_results)
 
     except Exception as e:
+        logger.error(f"   ❌ QUERY ERROR: {str(e)}")
         return f"Error executing SOQL query: {str(e)}"
 
 @mcp_application.tool()
 def describe_object(object_name: str) -> str:
-    """
-    Get metadata about a specific Salesforce object (fields, types, etc.).
-    Useful for understanding what fields are available before querying.
-    
-    Args:
-        object_name: The API name of the object (e.g., 'Account', 'Contact', 'CustomObject__c')
-    """
+    """Get metadata about a specific Salesforce object."""
+    logger.info(f"📋 TOOL CALL: describe_object -> {object_name}")
     try:
         sf = get_salesforce_client()
         desc = sf.__getattr__(object_name).describe()
         
         fields = [f"{f['name']} ({f['type']})" for f in desc['fields']]
+        result = f"Object: {desc['name']}\nLabel: {desc['label']}\nFields ({len(fields)}): {', '.join(fields[:50])}..."
         
-        info = f"""
-        Object: {desc['name']}
-        Label: {desc['label']}
-        Key Prefix: {desc['keyPrefix']}
-        Fields ({len(fields)} total): {', '.join(fields[:50])}
-        (Truncated field list to first 50)
-        """
-        return info
+        logger.info("   ✅ Description retrieved successfully.")
+        return result
         
     except Exception as e:
+        logger.error(f"   ❌ DESCRIBE ERROR: {str(e)}")
         return f"Error describing object '{object_name}': {str(e)}"
-
-@mcp_application.tool()
-def get_record_by_id(object_name: str, record_id: str) -> str:
-    """
-    Get all fields for a specific record by its ID.
-    
-    Args:
-        object_name: The API name of the object (e.g. Account)
-        record_id: The Salesforce ID of the record
-    """
-    try:
-        sf = get_salesforce_client()
-        record = sf.__getattr__(object_name).get(record_id)
-        record.pop('attributes', None)
-        return str(record)
-    except Exception as e:
-        return f"Error fetching record {record_id}: {str(e)}"
