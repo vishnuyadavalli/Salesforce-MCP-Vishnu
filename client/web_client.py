@@ -1,8 +1,10 @@
 import asyncio
 import uvicorn
-import os
+import json
+import traceback
+import httpx
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
@@ -12,149 +14,155 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from llm import get_llm
 
-# --- CONFIGURATION ---
-MCP_SERVER_URL = "http://localhost:8012/sse"
-PORT = 8000
+# --- NEW IMPORT FOR MEMORY ---
+from langgraph.checkpoint.memory import MemorySaver
 
-# Global state for the agent
+# --- CONFIGURATION ---
+MCP_SERVER_URL = "http://localhost:8000/sse"
+WEB_PORT = 8080
+
+# Global state
 agent = None
 mcp_client = None
 
-# --- HTML TEMPLATE ---
+# --- HTML TEMPLATE (Unchanged) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salesforce AI Agent</title>
+    <title>Salesforce Agent</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .typing-dot {
-            animation: typing 1.4s infinite ease-in-out both;
-        }
-        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
-        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
-        @keyframes typing {
-            0%, 80%, 100% { transform: scale(0); }
-            40% { transform: scale(1); }
-        }
+        .dot { animation: jump 1.4s infinite ease-in-out both; }
+        .dot:nth-child(1) { animation-delay: -0.32s; }
+        .dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes jump { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
     </style>
 </head>
-<body class="bg-gray-100 h-screen flex flex-col font-sans">
+<body class="bg-gray-50 h-screen flex flex-col font-sans">
 
     <!-- Header -->
-    <header class="bg-blue-600 text-white p-4 shadow-md flex justify-between items-center">
-        <h1 class="text-xl font-bold flex items-center gap-2">
-            ☁️ Salesforce MCP Agent
-        </h1>
-        <span id="status" class="text-xs bg-blue-800 px-2 py-1 rounded-full animate-pulse">Connecting...</span>
+    <header class="bg-white border-b border-gray-200 p-4 flex justify-between items-center shadow-sm z-10">
+        <div class="flex items-center gap-2">
+            <span class="text-2xl">☁️</span>
+            <h1 class="text-lg font-semibold text-gray-800">Salesforce Agent</h1>
+        </div>
+        <div id="status" class="flex items-center gap-2 px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium animate-pulse">
+            <span class="w-2 h-2 rounded-full bg-yellow-500"></span> Connecting...
+        </div>
     </header>
 
-    <!-- Chat Container -->
-    <main id="chat-container" class="flex-1 overflow-y-auto p-4 space-y-4 scroll-smooth">
-        <!-- Welcome Message -->
+    <!-- Chat Area -->
+    <main id="chat-box" class="flex-1 overflow-y-auto p-4 space-y-4 scroll-smooth pb-24">
         <div class="flex justify-start">
-            <div class="bg-white text-gray-800 p-3 rounded-lg rounded-tl-none shadow-sm max-w-[80%] border border-gray-200">
-                <p>Hello! I am your Salesforce Assistant. I can query records, describe objects, and help you manage your data. What would you like to know?</p>
+            <div class="bg-white border border-gray-200 text-gray-800 p-3 rounded-2xl rounded-tl-none shadow-sm max-w-[85%]">
+                <p>Hi! I'm connected to your Salesforce instance. Ask me to find records, describe objects, or run queries.</p>
             </div>
         </div>
     </main>
 
     <!-- Input Area -->
-    <footer class="bg-white p-4 border-t border-gray-200">
-        <div class="max-w-4xl mx-auto relative">
-            <form id="chat-form" class="flex gap-2">
-                <input type="text" id="user-input" 
-                    class="flex-1 border border-gray-300 rounded-full px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 shadow-sm"
-                    placeholder="Ask about accounts, leads, or schemas..." required autocomplete="off">
-                <button type="submit" 
-                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-full font-semibold shadow-sm transition-colors disabled:bg-gray-400">
-                    Send
-                </button>
-            </form>
-        </div>
+    <footer class="bg-white border-t border-gray-200 p-4 fixed bottom-0 w-full z-10">
+        <form id="chat-form" class="max-w-4xl mx-auto flex gap-3">
+            <input type="text" id="user-input" 
+                class="flex-1 bg-gray-100 border-0 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all outline-none"
+                placeholder="Type a message..." autocomplete="off">
+            <button type="submit" 
+                class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                Send
+            </button>
+        </form>
     </footer>
 
     <script>
-        const chatContainer = document.getElementById('chat-container');
-        const chatForm = document.getElementById('chat-form');
-        const userInput = document.getElementById('user-input');
-        const statusBadge = document.getElementById('status');
+        const chatBox = document.getElementById('chat-box');
+        const form = document.getElementById('chat-form');
+        const input = document.getElementById('user-input');
+        const status = document.getElementById('status');
         let isProcessing = false;
 
-        // Auto-scroll to bottom
         function scrollToBottom() {
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        // Add Message to UI
-        function addMessage(text, isUser, isTool = false) {
+        function addBubble(text, type) {
             const div = document.createElement('div');
-            div.className = `flex ${isUser ? 'justify-end' : 'justify-start'}`;
+            div.className = `flex ${type === 'user' ? 'justify-end' : 'justify-start'}`;
             
             const bubble = document.createElement('div');
-            const baseStyle = "p-3 rounded-lg shadow-sm max-w-[80%] border text-sm ";
+            const base = "p-3 rounded-2xl shadow-sm max-w-[85%] text-sm whitespace-pre-wrap ";
             
-            if (isUser) {
-                bubble.className = baseStyle + "bg-blue-600 text-white rounded-tr-none border-blue-700";
-            } else if (isTool) {
-                bubble.className = baseStyle + "bg-gray-50 text-gray-600 font-mono text-xs border-gray-200 whitespace-pre-wrap border-l-4 border-l-orange-400";
-            } else {
-                bubble.className = baseStyle + "bg-white text-gray-800 rounded-tl-none border-gray-200";
+            if (type === 'user') {
+                bubble.className = base + "bg-blue-600 text-white rounded-tr-none";
+            } else if (type === 'tool') {
+                bubble.className = base + "bg-gray-100 text-gray-600 font-mono text-xs border border-gray-200";
+            } else { // ai
+                bubble.className = base + "bg-white border border-gray-200 text-gray-800 rounded-tl-none";
             }
             
             bubble.innerText = text;
             div.appendChild(bubble);
-            chatContainer.appendChild(div);
+            chatBox.appendChild(div);
             scrollToBottom();
         }
 
-        // Show Typing Indicator
-        function showTyping() {
-            const div = document.createElement('div');
-            div.id = 'typing-indicator';
-            div.className = 'flex justify-start';
-            div.innerHTML = `
-                <div class="bg-white p-4 rounded-lg rounded-tl-none shadow-sm border border-gray-200 flex gap-1">
-                    <div class="typing-dot w-2 h-2 bg-gray-400 rounded-full"></div>
-                    <div class="typing-dot w-2 h-2 bg-gray-400 rounded-full"></div>
-                    <div class="typing-dot w-2 h-2 bg-gray-400 rounded-full"></div>
-                </div>
-            `;
-            chatContainer.appendChild(div);
-            scrollToBottom();
+        function setStatus(state) {
+            if (state === 'connected') {
+                status.className = "flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium";
+                status.innerHTML = '<span class="w-2 h-2 rounded-full bg-green-500"></span> Connected';
+            } else {
+                status.className = "flex items-center gap-2 px-3 py-1 bg-red-100 text-red-700 rounded-full text-xs font-medium";
+                status.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-500"></span> Disconnected';
+            }
         }
 
-        function removeTyping() {
-            const el = document.getElementById('typing-indicator');
-            if (el) el.remove();
-        }
+        // Polling for health status
+        setInterval(() => {
+            fetch('/health').then(r => r.ok ? setStatus('connected') : setStatus('error'))
+                            .catch(() => setStatus('error'));
+        }, 5000);
 
-        // Handle Form Submit
-        chatForm.addEventListener('submit', async (e) => {
+        // Send Message
+        form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const message = userInput.value.trim();
-            if (!message || isProcessing) return;
+            const msg = input.value.trim();
+            if (!msg || isProcessing) return;
 
-            addMessage(message, true);
-            userInput.value = '';
+            addBubble(msg, 'user');
+            input.value = '';
             isProcessing = true;
-            showTyping();
+
+            const typingId = 'typing-' + Date.now();
+            const typingDiv = document.createElement('div');
+            typingDiv.id = typingId;
+            typingDiv.className = 'flex justify-start';
+            typingDiv.innerHTML = `
+                <div class="bg-white border border-gray-200 p-4 rounded-2xl rounded-tl-none shadow-sm flex gap-1">
+                    <div class="dot w-2 h-2 bg-gray-400 rounded-full"></div>
+                    <div class="dot w-2 h-2 bg-gray-400 rounded-full"></div>
+                    <div class="dot w-2 h-2 bg-gray-400 rounded-full"></div>
+                </div>`;
+            chatBox.appendChild(typingDiv);
+            scrollToBottom();
 
             try {
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
+                    body: JSON.stringify({ message: msg })
                 });
 
-                if (!response.ok) throw new Error("Server Error");
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || "Server Error");
+                }
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
 
-                removeTyping();
+                document.getElementById(typingId).remove();
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -168,73 +176,80 @@ HTML_TEMPLATE = """
                             try {
                                 const data = JSON.parse(line.replace('data: ', ''));
                                 if (data.type === 'tool') {
-                                    addMessage(`🛠️ Tool Used: ${data.name}\nOutput: ${data.content.substring(0, 150)}...`, false, true);
+                                    addBubble(`🔧 Tool: ${data.name}\n${data.content.substring(0, 200)}...`, 'tool');
                                 } else if (data.type === 'answer') {
-                                    addMessage(data.content, false);
+                                    addBubble(data.content, 'ai');
+                                } else if (data.type === 'error') {
+                                    addBubble("❌ Error: " + data.content, 'tool');
                                 }
-                            } catch (e) { console.error("Parse error", e); }
+                            } catch (e) { console.error(e); }
                         }
                     }
                 }
-            } catch (error) {
-                removeTyping();
-                addMessage("❌ Error: " + error.message, false);
+            } catch (err) {
+                document.getElementById(typingId)?.remove();
+                addBubble("Network Error: " + err.message, 'tool');
             } finally {
                 isProcessing = false;
             }
         });
-
-        // Initial Health Check
-        fetch('/health').then(r => {
-            if(r.ok) {
-                statusBadge.innerText = "Connected";
-                statusBadge.classList.remove("bg-blue-800", "animate-pulse");
-                statusBadge.classList.add("bg-green-500");
-            } else {
-                statusBadge.innerText = "Offline";
-                statusBadge.classList.add("bg-red-500");
-            }
-        }).catch(() => {
-             statusBadge.innerText = "Offline";
-             statusBadge.classList.add("bg-red-500");
-        });
-
     </script>
 </body>
 </html>
 """
 
-# --- BACKEND LOGIC ---
+# --- BACKEND ---
+
+async def check_connection():
+    print(f"🔎 Checking connection to {MCP_SERVER_URL}...")
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(MCP_SERVER_URL, timeout=2.0)
+            print("   ✅ Server is reachable.")
+            return True
+        except httpx.ConnectError:
+            print("   ❌ Connection Refused: Server is NOT running on port 8012.")
+            return False
+        except Exception as e:
+             print(f"   ⚠️ Warning: Connection check failed ({e}), but trying anyway.")
+             return True
 
 async def startup():
-    """Initialize the Agent connection on startup."""
     global mcp_client, agent
-    print("--- WEB CLIENT STARTING ---")
+    print("\n--- WEB CLIENT STARTING ---")
     
-    try:
-        # 1. Initialize LLM
-        llm = get_llm()
-        print("✅ LLM Initialized")
+    if not await check_connection():
+        print("❌ CRITICAL: Cannot connect to MCP Server.")
+        return
 
-        # 2. Connect to MCP Server
+    try:
+        llm = get_llm()
+        await llm.ainvoke([HumanMessage(content="Hi")])
+        print("   ✅ LLM Ready")
+
         mcp_client = MultiServerMCPClient({
             "salesforce": {
                 "transport": "sse",
                 "url": MCP_SERVER_URL
             }
         })
-        print(f"🔌 Connecting to MCP at {MCP_SERVER_URL}...")
         
-        mcp_tools = await mcp_client.get_tools()
-        print(f"✅ MCP Connected. Found {len(mcp_tools)} tools.")
+        try:
+            mcp_tools = await asyncio.wait_for(mcp_client.get_tools(), timeout=5.0)
+        except asyncio.TimeoutError:
+            raise Exception(f"Connection timed out.")
+            
+        print(f"   ✅ Connected! Found {len(mcp_tools)} tools.")
 
-        # 3. Create Agent
-        agent = create_react_agent(llm, mcp_tools)
-        print("🚀 Agent Ready!")
+        # --- ENABLE MEMORY ---
+        memory = MemorySaver()
+        agent = create_react_agent(llm, mcp_tools, checkpointer=memory)
+        # ---------------------
+        
+        print("🚀 AGENT READY! Go to http://localhost:8080")
 
     except Exception as e:
-        print(f"❌ CRITICAL STARTUP ERROR: {e}")
-        # We don't exit, so the UI can still show the error state
+        print(f"\n❌ CRITICAL STARTUP ERROR: {e}")
 
 async def homepage(request):
     return HTMLResponse(HTML_TEMPLATE)
@@ -246,48 +261,32 @@ async def health(request):
 
 async def chat_endpoint(request):
     if not agent:
-        return JSONResponse({"error": "Agent not initialized. Check console logs."}, status_code=500)
+        return JSONResponse({"error": "Agent offline"}, status_code=503)
 
     data = await request.json()
-    user_message = data.get("message")
+    user_msg = data.get("message", "")
 
-    async def event_stream():
+    # Use a config to track the conversation thread
+    config = {"configurable": {"thread_id": "web_user_1"}}
+
+    async def generator():
         try:
-            # Stream the agent's thinking process
             async for chunk in agent.astream(
-                {"messages": [HumanMessage(content=user_message)]},
+                {"messages": [HumanMessage(content=user_msg)]},
+                config=config,  # Pass the thread config here
                 stream_mode="updates"
             ):
                 for node, values in chunk.items():
-                    # Handle Tool Outputs (intermediate steps)
                     for msg in values["messages"]:
                         if hasattr(msg, 'tool_call_id'):
-                            # Send tool output to UI
-                            payload = {
-                                "type": "tool",
-                                "name": msg.name,
-                                "content": str(msg.content)
-                            }
-                            yield f"data: {json.dumps(payload)}\n\n"
-                        
-                        # Handle Final Answer
-                        elif hasattr(msg, 'content') and msg.content and node == "agent":
-                             # Some nodes are intermediate thoughts, we want the final response
-                             # In LangGraph, typically the last agent message is the answer,
-                             # but we can stream partials if we want. 
-                             # For simplicity, we send agent messages as answers.
-                             payload = {
-                                 "type": "answer",
-                                 "content": msg.content
-                             }
-                             yield f"data: {json.dumps(payload)}\n\n"
-
+                            yield f"data: {json.dumps({'type': 'tool', 'name': msg.name, 'content': str(msg.content)})}\n\n"
+                        elif hasattr(msg, 'content') and msg.content:
+                             yield f"data: {json.dumps({'type': 'answer', 'content': msg.content})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'answer', 'content': f'Error: {str(e)}'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
 
-    return HTMLResponse(event_stream(), media_type='text/event-stream')
+    return StreamingResponse(generator(), media_type='text/event-stream')
 
-# --- APP DEFINITION ---
 app = Starlette(
     debug=True,
     routes=[
@@ -295,12 +294,9 @@ app = Starlette(
         Route("/chat", chat_endpoint, methods=["POST"]),
         Route("/health", health),
     ],
-    middleware=[
-        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
-    ],
+    middleware=[Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])],
     on_startup=[startup]
 )
 
 if __name__ == "__main__":
-    # Run on a different port than the MCP server
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=WEB_PORT)
