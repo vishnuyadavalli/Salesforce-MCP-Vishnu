@@ -9,9 +9,9 @@ CIRCUIT_LLM_API_ENDPOINT = os.environ.get('CIRCUIT_LLM_API_ENDPOINT', "https://c
 CIRCUIT_LLM_API_VERSION = os.environ.get('CIRCUIT_LLM_API_VERSION', "2025-04-01-preview")
 
 # Salesforce Specific
-SALESFORCE_USERNAME = os.environ.get('SALESFORCE_USERNAME', "viyadava@thousandeyes.com.vishnus48")
-SALESFORCE_PASSWORD = os.environ.get('SALESFORCE_PASSWORD', "Lakshmivishnu1@")
-SALESFORCE_SECURITY_TOKEN = os.environ.get('SALESFORCE_SECURITY_TOKEN', "4JvNDnRNNGUof3lIsrQDmrsai")
+SALESFORCE_USERNAME = os.environ.get('SALESFORCE_USERNAME', "dddddd")
+SALESFORCE_PASSWORD = os.environ.get('SALESFORCE_PASSWORD', "ddddddd")
+SALESFORCE_SECURITY_TOKEN = os.environ.get('SALESFORCE_SECURITY_TOKEN', "ddddd")
 # Optional: If using a sandbox or custom domain
 SALESFORCE_DOMAIN = os.environ.get('SALESFORCE_DOMAIN', 'test') 
 

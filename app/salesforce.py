@@ -222,3 +222,51 @@ def update_record(object_name: str, record_id: str, json_data: str) -> str:
     except Exception as e:
         logger.error(f"   ❌ UPDATE ERROR: {str(e)}")
         return f"Error updating record: {str(e)}"
+
+@mcp_application.tool()
+def find_metadata_dependencies(metadata_id: str) -> str:
+    """
+    Find dependencies for a specific Metadata Component using the Tooling API.
+    This helps analyze impact before changes.
+    
+    Args:
+        metadata_id: The Salesforce ID of the metadata component (e.g., CustomField ID, ApexClass ID).
+    """
+    logger.info(f"🕸️ TOOL CALL: find_metadata_dependencies -> {metadata_id}")
+    try:
+        sf = get_salesforce_client()
+        
+        # 1. Find what this component DEPENDS ON (e.g., Apex Class uses Field X)
+        # Query MetadataComponentDependency where MetadataComponentId is OUR ID
+        query_uses = f"SELECT RefMetadataComponentName, RefMetadataComponentType FROM MetadataComponentDependency WHERE MetadataComponentId = '{metadata_id}'"
+        res_uses = sf.tooling.query(query_uses)
+        
+        uses_list = []
+        for rec in res_uses.get('records', []):
+            uses_list.append(f"{rec['RefMetadataComponentType']}: {rec['RefMetadataComponentName']}")
+
+        # 2. Find what DEPENDS ON this component (e.g., Layout Y uses Field X)
+        # Query MetadataComponentDependency where RefMetadataComponentId is OUR ID
+        query_used_by = f"SELECT MetadataComponentName, MetadataComponentType FROM MetadataComponentDependency WHERE RefMetadataComponentId = '{metadata_id}'"
+        res_used_by = sf.tooling.query(query_used_by)
+        
+        used_by_list = []
+        for rec in res_used_by.get('records', []):
+            used_by_list.append(f"{rec['MetadataComponentType']}: {rec['MetadataComponentName']}")
+
+        # Format Output
+        output = f"Dependency Analysis for ID: {metadata_id}\n\n"
+        
+        output += f"🔻 USES ({len(uses_list)} items):\n"
+        output += "\n".join(uses_list[:20]) if uses_list else "None"
+        if len(uses_list) > 20: output += "\n... (truncated)"
+        
+        output += f"\n\n🔺 USED BY ({len(used_by_list)} items):\n"
+        output += "\n".join(used_by_list[:20]) if used_by_list else "None"
+        if len(used_by_list) > 20: output += "\n... (truncated)"
+        
+        return output
+
+    except Exception as e:
+        logger.error(f"   ❌ DEPENDENCY ERROR: {str(e)}")
+        return f"Error finding dependencies: {str(e)}. Note: You must provide a valid 15 or 18 char Metadata ID."
