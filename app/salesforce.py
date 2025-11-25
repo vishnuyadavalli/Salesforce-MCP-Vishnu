@@ -3,7 +3,7 @@ import os
 import logging
 import json
 
-# Configure logging to print to the server console
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("salesforce_tools")
 
@@ -14,66 +14,126 @@ if current_dir not in sys.path:
 # ----------------
 
 from simple_salesforce import Salesforce
-from properties import (
-    SALESFORCE_USERNAME, 
-    SALESFORCE_PASSWORD, 
-    SALESFORCE_SECURITY_TOKEN,
-    SALESFORCE_DOMAIN
-)
+from org_manager import org_manager
+from server_instance import mcp_application
 
-# CRITICAL IMPORT
-try:
-    from server_instance import mcp_application
-except ImportError:
-    print("❌ IMPORT ERROR: Could not import 'mcp_application' from 'server_instance'.")
-    raise
+# --- HELPER ---
+def get_salesforce_client(org_alias: str = None) -> Salesforce:
+    """
+    Establish a connection. 
+    If org_alias is provided, connects to that specific org.
+    Otherwise, connects to the default org.
+    """
+    creds = org_manager.get_creds(org_alias)
+    
+    if not creds:
+        raise ValueError(f"No credentials found for org alias: {org_alias or org_manager.default_org}")
 
-def get_salesforce_client() -> Salesforce:
-    """Helper to establish a Salesforce connection."""
-    logger.info("🔌 Connecting to Salesforce...")
+    logger.info(f"🔌 Connecting to Salesforce Org: {org_alias or org_manager.default_org}...")
     try:
         kwargs = {
-            'username': SALESFORCE_USERNAME,
-            'password': SALESFORCE_PASSWORD,
-            'security_token': SALESFORCE_SECURITY_TOKEN,
+            'username': creds['username'],
+            'password': creds['password'],
+            'security_token': creds['security_token'],
         }
-        if SALESFORCE_DOMAIN:
-            kwargs['domain'] = SALESFORCE_DOMAIN
+        if creds.get('domain'):
+            kwargs['domain'] = creds['domain']
             
         sf = Salesforce(**kwargs)
-        logger.info("✅ Salesforce Connection Established.")
         return sf
     except Exception as e:
         logger.error(f"❌ Salesforce Connection Failed: {e}")
         raise e
 
-# --- READ TOOLS ---
+# --- ORG MANAGEMENT TOOLS ---
+
+@mcp_application.tool()
+def add_salesforce_org(alias: str, username: str, password: str, token: str, domain: str = None) -> str:
+    """
+    Register a new Salesforce Org locally for comparison.
+    Args:
+        alias: A short name (e.g., 'UAT', 'Production', 'DevBox1')
+        username: Salesforce Username
+        password: Salesforce Password
+        token: Security Token
+        domain: Optional (e.g., 'test' for sandbox)
+    """
+    creds = {
+        "username": username,
+        "password": password,
+        "security_token": token,
+        "domain": domain
+    }
+    org_manager.save_org(alias, creds)
+    return f"✅ Org '{alias}' added successfully. You can now use it for comparisons."
+
+@mcp_application.tool()
+def list_connected_orgs() -> str:
+    """List all Salesforce organizations currently configured."""
+    orgs = org_manager.list_orgs()
+    default = org_manager.default_org
+    return f"Connected Orgs: {', '.join(orgs)}. (Current Default: {default})"
+
+@mcp_application.tool()
+def set_default_org(alias: str) -> str:
+    """Set the default org for standard queries."""
+    if org_manager.set_default(alias):
+        return f"✅ Default org switched to '{alias}'."
+    return f"❌ Org '{alias}' not found."
+
+# --- COMPARISON & METADATA TOOLS ---
+
+@mcp_application.tool()
+def fetch_metadata_source(org_alias: str, metadata_type: str, component_name: str) -> str:
+    """
+    Fetches the actual code/markup body of a metadata component for comparison.
+    Supported Types: ApexClass, ApexTrigger, ApexPage (Visualforce), ApexComponent.
+    
+    Args:
+        org_alias: The alias of the org to fetch from (e.g., 'Primary', 'UAT').
+        metadata_type: e.g., 'ApexClass'
+        component_name: e.g., 'MyController'
+    """
+    logger.info(f"📜 Fetching {metadata_type} / {component_name} from {org_alias}")
+    try:
+        sf = get_salesforce_client(org_alias)
+        
+        # Different objects store code in different fields
+        query_field = "Body"
+        if metadata_type in ["ApexPage", "ApexComponent"]:
+            query_field = "Markup"
+            
+        query = f"SELECT {query_field} FROM {metadata_type} WHERE Name = '{component_name}' LIMIT 1"
+        
+        # FIX: Use sf.restful() to query the Tooling API correctly
+        # simple-salesforce does not have a built-in .tooling.query() method
+        result = sf.restful("tooling/query", params={"q": query})
+        
+        if result['totalSize'] == 0:
+            return f"❌ Component '{component_name}' not found in org '{org_alias}'."
+            
+        code = result['records'][0][query_field]
+        return f"--- BEGIN CODE ({org_alias}) ---\n{code}\n--- END CODE ---"
+
+    except Exception as e:
+        return f"Error fetching metadata from {org_alias}: {str(e)}"
+
+# --- STANDARD TOOLS ---
 
 @mcp_application.tool()
 def execute_soql_query(query: str) -> str:
-    """
-    Execute a SOQL (Salesforce Object Query Language) query.
-    Use this to find records or counts, e.g.:
-    - "SELECT Id, Name FROM Account LIMIT 5"
-    - "SELECT COUNT() FROM Contact"
-    
-    Args:
-        query: The full SOQL query string.
-    """
+    """Execute a SOQL query against the DEFAULT org."""
     logger.info(f"🔍 TOOL CALL: execute_soql_query -> {query}")
     try:
-        sf = get_salesforce_client()
+        sf = get_salesforce_client() # Uses default
         results = sf.query(query)
         
         if results.get('totalSize') > 0 and not results.get('records'):
              return f"Query executed successfully. Total Count: {results['totalSize']}"
 
         records = results.get('records', [])
-        logger.info(f"   Found {len(records)} records.")
-        
         if not records:
-             if results.get('totalSize') == 0:
-                 return "Query executed successfully but returned no records."
+             if results.get('totalSize') == 0: return "Query executed successfully but returned no records."
              return f"Total Count: {results['totalSize']}"
         
         formatted_results = []
@@ -84,28 +144,22 @@ def execute_soql_query(query: str) -> str:
         return f"Found {results['totalSize']} records. Showing first {len(records)}:\n" + "\n---\n".join(formatted_results)
 
     except Exception as e:
-        logger.error(f"   ❌ QUERY ERROR: {str(e)}")
         return f"Error executing SOQL query: {str(e)}"
 
 @mcp_application.tool()
 def describe_object(object_name: str) -> str:
     """Get metadata about a specific Salesforce object (fields, types)."""
-    logger.info(f"📋 TOOL CALL: describe_object -> {object_name}")
     try:
         sf = get_salesforce_client()
         desc = sf.__getattr__(object_name).describe()
-        
         fields = [f"{f['name']} ({f['type']})" for f in desc['fields']]
-        result = f"Object: {desc['name']}\nLabel: {desc['label']}\nFields ({len(fields)}): {', '.join(fields[:50])}..."
-        
-        return result
+        return f"Object: {desc['name']}\nLabel: {desc['label']}\nFields ({len(fields)}): {', '.join(fields[:50])}..."
     except Exception as e:
         return f"Error describing object '{object_name}': {str(e)}"
 
 @mcp_application.tool()
 def get_record_by_id(object_name: str, record_id: str) -> str:
     """Get all fields for a specific record by its ID."""
-    logger.info(f"🆔 TOOL CALL: get_record_by_id -> {object_name} / {record_id}")
     try:
         sf = get_salesforce_client()
         record = sf.__getattr__(object_name).get(record_id)
@@ -114,159 +168,42 @@ def get_record_by_id(object_name: str, record_id: str) -> str:
     except Exception as e:
         return f"Error fetching record {record_id}: {str(e)}"
 
-# --- SEARCH TOOLS ---
-
 @mcp_application.tool()
 def search_records(keyword: str) -> str:
-    """
-    Search for records using SOSL (Salesforce Object Search Language).
-    Useful when you don't know the exact field to query.
-    Example: "Find 'Acme'" will search Accounts, Contacts, Leads, etc.
-    """
-    logger.info(f"🔎 TOOL CALL: search_records -> {keyword}")
+    """Search for records using SOSL (Salesforce Object Search Language)."""
     try:
         sf = get_salesforce_client()
-        # Simple SOSL search across all fields
         sosl = f"FIND {{{keyword}}} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, Name, Email), Lead(Id, Name, Company)"
         results = sf.search(sosl)
-        
         found = []
-        # Iterate through search results (which are grouped by object type)
         if 'searchRecords' in results:
             for rec in results['searchRecords']:
                 rec.pop('attributes', None)
                 found.append(str(rec))
-        
-        if not found:
-            return f"No records found for '{keyword}'."
-            
+        if not found: return f"No records found for '{keyword}'."
         return f"Found {len(found)} records:\n" + "\n".join(found)
     except Exception as e:
-        logger.error(f"   ❌ SEARCH ERROR: {str(e)}")
         return f"Error searching records: {str(e)}"
 
 @mcp_application.tool()
-def list_available_objects() -> str:
-    """
-    List all available SObjects (tables) in the Salesforce Org.
-    Useful to find the API name of custom objects.
-    """
-    logger.info(f"📚 TOOL CALL: list_available_objects")
-    try:
-        sf = get_salesforce_client()
-        desc = sf.describe()
-        
-        objects = []
-        for obj in desc['sobjects']:
-            if obj['queryable']: # Only show things we can actually query
-                objects.append(f"{obj['name']} ({obj['label']})")
-        
-        return f"Found {len(objects)} queryable objects. First 50:\n" + ", ".join(objects[:50])
-    except Exception as e:
-        return f"Error listing objects: {str(e)}"
-
-# --- WRITE TOOLS (Create / Update) ---
-
-@mcp_application.tool()
 def create_record(object_name: str, json_data: str) -> str:
-    """
-    Create a new record in Salesforce.
-    
-    Args:
-        object_name: The API name of the object (e.g., 'Account', 'Lead')
-        json_data: A JSON string containing the fields to set.
-                   Example: '{"Name": "New Company", "Industry": "Tech"}'
-    """
-    logger.info(f"✨ TOOL CALL: create_record -> {object_name}")
+    """Create a new record in Salesforce."""
     try:
         data = json.loads(json_data)
         sf = get_salesforce_client()
-        
         result = sf.__getattr__(object_name).create(data)
-        
-        if result.get('success'):
-            return f"✅ Successfully created {object_name}. ID: {result.get('id')}"
-        else:
-            return f"❌ Failed to create record. Errors: {result.get('errors')}"
-            
-    except json.JSONDecodeError:
-        return "Error: json_data must be a valid JSON string."
+        if result.get('success'): return f"✅ Successfully created {object_name}. ID: {result.get('id')}"
+        else: return f"❌ Failed to create record. Errors: {result.get('errors')}"
     except Exception as e:
-        logger.error(f"   ❌ CREATE ERROR: {str(e)}")
         return f"Error creating record: {str(e)}"
 
 @mcp_application.tool()
 def update_record(object_name: str, record_id: str, json_data: str) -> str:
-    """
-    Update an existing record in Salesforce.
-    
-    Args:
-        object_name: The API name of the object (e.g., 'Account')
-        record_id: The ID of the record to update.
-        json_data: A JSON string containing the fields to update.
-                   Example: '{"Status": "Closed", "Priority": "High"}'
-    """
-    logger.info(f"✏️ TOOL CALL: update_record -> {object_name} / {record_id}")
+    """Update an existing record in Salesforce."""
     try:
         data = json.loads(json_data)
         sf = get_salesforce_client()
-        
-        # The simple-salesforce update method returns 204 (None) on success
-        result = sf.__getattr__(object_name).update(record_id, data)
-        
-        # If no exception was raised, it was successful
+        sf.__getattr__(object_name).update(record_id, data)
         return f"✅ Successfully updated {object_name} record {record_id}."
-            
-    except json.JSONDecodeError:
-        return "Error: json_data must be a valid JSON string."
     except Exception as e:
-        logger.error(f"   ❌ UPDATE ERROR: {str(e)}")
         return f"Error updating record: {str(e)}"
-
-@mcp_application.tool()
-def find_metadata_dependencies(metadata_id: str) -> str:
-    """
-    Find dependencies for a specific Metadata Component using the Tooling API.
-    This helps analyze impact before changes.
-    
-    Args:
-        metadata_id: The Salesforce ID of the metadata component (e.g., CustomField ID, ApexClass ID).
-    """
-    logger.info(f"🕸️ TOOL CALL: find_metadata_dependencies -> {metadata_id}")
-    try:
-        sf = get_salesforce_client()
-        
-        # 1. Find what this component DEPENDS ON (e.g., Apex Class uses Field X)
-        # Query MetadataComponentDependency where MetadataComponentId is OUR ID
-        query_uses = f"SELECT RefMetadataComponentName, RefMetadataComponentType FROM MetadataComponentDependency WHERE MetadataComponentId = '{metadata_id}'"
-        res_uses = sf.tooling.query(query_uses)
-        
-        uses_list = []
-        for rec in res_uses.get('records', []):
-            uses_list.append(f"{rec['RefMetadataComponentType']}: {rec['RefMetadataComponentName']}")
-
-        # 2. Find what DEPENDS ON this component (e.g., Layout Y uses Field X)
-        # Query MetadataComponentDependency where RefMetadataComponentId is OUR ID
-        query_used_by = f"SELECT MetadataComponentName, MetadataComponentType FROM MetadataComponentDependency WHERE RefMetadataComponentId = '{metadata_id}'"
-        res_used_by = sf.tooling.query(query_used_by)
-        
-        used_by_list = []
-        for rec in res_used_by.get('records', []):
-            used_by_list.append(f"{rec['MetadataComponentType']}: {rec['MetadataComponentName']}")
-
-        # Format Output
-        output = f"Dependency Analysis for ID: {metadata_id}\n\n"
-        
-        output += f"🔻 USES ({len(uses_list)} items):\n"
-        output += "\n".join(uses_list[:20]) if uses_list else "None"
-        if len(uses_list) > 20: output += "\n... (truncated)"
-        
-        output += f"\n\n🔺 USED BY ({len(used_by_list)} items):\n"
-        output += "\n".join(used_by_list[:20]) if used_by_list else "None"
-        if len(used_by_list) > 20: output += "\n... (truncated)"
-        
-        return output
-
-    except Exception as e:
-        logger.error(f"   ❌ DEPENDENCY ERROR: {str(e)}")
-        return f"Error finding dependencies: {str(e)}. Note: You must provide a valid 15 or 18 char Metadata ID."
