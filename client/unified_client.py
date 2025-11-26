@@ -20,7 +20,6 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
-# Reuse your existing LLM setup
 try:
     from client.llm import get_llm
 except ImportError:
@@ -42,28 +41,32 @@ You are an Intelligent Support Engineer. Your goal is to resolve Salesforce Case
 
 ### 🧠 RESOLUTION WORKFLOW:
 
-1. **FETCH CASE**: 
-   - If the user provides a Case Number (e.g., "00001023"), use `execute_soql_query`.
-   - Query pattern: `SELECT Subject, Description, Status, Priority FROM Case WHERE CaseNumber = 'THE_NUMBER' LIMIT 1`
-   - If no case is found, stop and tell the user.
+1. **FETCH CASE**: Use `execute_soql_query` to get Case details.
+2. **SEARCH**: Use `search_documentation` based on the Case Subject/Description.
+3. **RESOLVE**: Use `read_page_content` to get the solution.
 
-2. **ANALYZE & SEARCH**:
-   - Extract key technical terms from the Case 'Subject' and 'Description'.
-   - Use `search_documentation` to find relevant Confluence pages using those keywords.
+### 📝 OUTPUT FORMAT (Strictly follow this order):
 
-3. **READ & RESOLVE**:
-   - Use `read_page_content` to get the documentation details.
-   - **CRITICAL RENDERING RULE**: The tool returns HTML.
-   - If you want to display the documentation content to the user, return the **Raw HTML** wrapped in `<article>` tags.
-   - Example: `<article><h1>Title</h1><p>Content...</p></article>`
-   - Do NOT escape the tags (e.g. do not use &lt;).
-   - Do NOT wrap it in a Markdown code block.
-   - You can add a brief summary *before* the `<article>` tag if needed.
+**1. CASE DETAILS**
+Start your response immediately with a Markdown summary of the case:
+> **Case #**: [Number]
+> **Subject**: [Subject]
+> **Priority**: [Priority]
+> **Description**: [Short Description]
+
+**2. RESOLUTION (Documentation)**
+Present the solution found in Confluence.
+- **CRITICAL**: You MUST wrap the Confluence HTML content in `<article>` tags.
+- Example: `<article><h1>Page Title</h1><p>Steps...</p></article>`
+- Do not wrap this in markdown code blocks.
+
+**3. SOURCE**
+End your response with the source link provided by the tool:
+**Source:** [Page Title](URL)
 
 ### 🛡️ RULES:
-- Always verify the Case exists first.
-- Do not hallucinate solutions.
-- Be professional.
+- If no case is found, state that clearly.
+- If no documentation is found, provide the Case Details but state no resolution was found.
 """)
 
 # --- HTML TEMPLATE ---
@@ -81,27 +84,19 @@ HTML_TEMPLATE = r"""
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         
-        /* Standard Chat Styles */
+        /* Markdown Styles */
         .prose p { margin-bottom: 0.5rem; }
         .prose ul { list-style-type: disc; margin-left: 1.5rem; }
-        .prose pre { background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 0.5rem; overflow-x: auto; font-size: 0.85rem; }
+        .prose blockquote { border-left: 4px solid #6366f1; background-color: #f8fafc; padding: 1rem; border-radius: 0 0.5rem 0.5rem 0; margin-bottom: 1rem; }
+        .prose strong { color: #1e293b; }
+        .prose a { color: #2563eb; text-decoration: underline; font-weight: 600; }
 
-        /* Confluence Wiki Content Styles */
-        .wiki-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #172b4d; font-size: 0.95rem; }
-        .wiki-content h1 { font-size: 1.5em; font-weight: 600; margin-top: 1em; margin-bottom: 0.5em; color: #172b4d; }
-        .wiki-content h2 { font-size: 1.25em; font-weight: 500; margin-top: 1em; margin-bottom: 0.5em; border-bottom: 1px solid #ebecf0; }
-        .wiki-content p { margin-bottom: 0.75em; line-height: 1.5; }
-        .wiki-content ul, .wiki-content ol { margin-bottom: 1em; padding-left: 1.5em; }
-        .wiki-content ul { list-style-type: disc; }
-        .wiki-content ol { list-style-type: decimal; }
-        .wiki-content pre { background: #f4f5f7; padding: 0.75rem; border-radius: 4px; overflow-x: auto; border: 1px solid #dfe1e6; font-family: monospace; }
-        .wiki-content code { background: #f4f5f7; padding: 0.1em 0.3em; border-radius: 3px; font-family: monospace; color: #c7254e; }
-        .wiki-content table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.9em; }
-        .wiki-content th { background-color: #f4f5f7; font-weight: 600; text-align: left; border: 1px solid #dfe1e6; padding: 8px; }
-        .wiki-content td { border: 1px solid #dfe1e6; padding: 8px; }
-        .wiki-content a { color: #0052cc; text-decoration: none; }
-        .wiki-content a:hover { text-decoration: underline; }
-        .wiki-content img { max-width: 100%; height: auto; margin: 0.5em 0; border-radius: 3px; }
+        /* Confluence Styles */
+        .wiki-content { font-family: -apple-system, sans-serif; color: #172b4d; font-size: 0.95rem; }
+        .wiki-content h1 { font-size: 1.5em; font-weight: 700; margin-top: 0; margin-bottom: 0.5em; color: #1e293b; }
+        .wiki-content h2 { font-size: 1.25em; font-weight: 600; margin-top: 1em; border-bottom: 1px solid #e2e8f0; }
+        .wiki-content ul { list-style-type: disc; padding-left: 1.5em; margin-bottom: 1em; }
+        .wiki-content img { max-width: 100%; border-radius: 4px; border: 1px solid #e2e8f0; }
     </style>
 </head>
 <body class="bg-slate-50 h-screen flex flex-col font-sans text-slate-800">
@@ -148,13 +143,12 @@ HTML_TEMPLATE = r"""
         const welcomeScreen = document.getElementById('welcome-screen');
         const messagesDiv = document.getElementById('messages');
         const userInput = document.getElementById('user-input');
-        
         let typingIndicatorElement = null;
 
         function triggerCaseResolve() {
             const caseNum = document.getElementById('case-input').value.trim();
             if(!caseNum) return;
-            handleMessage(`I have a Salesforce Case with number '${caseNum}'. Fetch its details and find a resolution in Confluence.`);
+            handleMessage(`I have a Salesforce Case with number '${caseNum}'. Fetch its details and find a resolution in Confluence. Additionally, use Case_Category__c, Component__c fields on the case as well to look for solution.`);
         }
 
         function showTyping(text="Thinking...") {
@@ -162,40 +156,26 @@ HTML_TEMPLATE = r"""
                 typingIndicatorElement.querySelector('span').innerText = text;
                 return;
             }
-            
             const div = document.createElement('div');
             div.id = "typing-indicator";
             div.className = 'flex justify-start fade-in';
-            div.innerHTML = `
-                <div class="bg-white border border-slate-200 p-4 rounded-2xl rounded-tl-sm shadow-sm flex items-center gap-3">
-                    <div class="flex gap-1">
-                        <div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce"></div>
-                        <div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style="animation-delay: 0.1s"></div>
-                        <div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
-                    </div>
-                    <span class="text-xs font-medium text-slate-500 uppercase tracking-wide">${text}</span>
-                </div>`;
-            
+            div.innerHTML = `<div class="bg-white border border-slate-200 p-4 rounded-2xl rounded-tl-sm shadow-sm flex items-center gap-3"><div class="flex gap-1"><div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce"></div><div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style="animation-delay: 0.1s"></div><div class="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style="animation-delay: 0.2s"></div></div><span class="text-xs font-medium text-slate-500 uppercase tracking-wide">${text}</span></div>`;
             messagesDiv.appendChild(div);
             messagesDiv.scrollIntoView({ behavior: "smooth", block: "end" });
             typingIndicatorElement = div;
         }
 
         function hideTyping() {
-            if (typingIndicatorElement) {
-                typingIndicatorElement.remove();
-                typingIndicatorElement = null;
-            }
+            if (typingIndicatorElement) { typingIndicatorElement.remove(); typingIndicatorElement = null; }
         }
 
         function addMessage(role, text, type='text') {
             if (role !== 'system') hideTyping();
-            
             welcomeScreen.classList.add('hidden');
             messagesDiv.classList.remove('hidden');
+            
             const div = document.createElement('div');
             div.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'} fade-in`;
-            
             const bubble = document.createElement('div');
             const base = "p-4 rounded-2xl shadow-sm max-w-[90%] text-sm leading-relaxed ";
             
@@ -206,21 +186,27 @@ HTML_TEMPLATE = r"""
                 bubble.className = base + "bg-slate-50 text-slate-500 font-mono text-xs border border-slate-200 w-full overflow-hidden";
                 bubble.innerHTML = `<div class="flex items-center gap-2 mb-1"><i data-lucide="wrench" class="w-3 h-3"></i> <span class="font-bold">Tool Used</span></div><div class="truncate">${text}</div>`;
             } else {
+                // HTML / MARKDOWN RENDERING
                 if (text.includes('<article>')) {
-                    // HTML MODE
-                    bubble.className = base + "bg-white border border-slate-200 text-slate-800 rounded-tl-sm wiki-content overflow-x-auto";
-                    let content = text;
-                    try { content = text.split('<article>')[1].split('</article>')[0]; } catch(e) {}
-                    content = content.replace(/```html/g, '').replace(/```/g, '');
-                    content = content.replace(/\\\\n/g, '').replace(/\\\\"/g, '"'); 
-                    if(content.includes('&lt;')) {
-                        const txt = document.createElement("textarea");
-                        txt.innerHTML = content;
-                        content = txt.value;
+                    bubble.className = base + "bg-white border border-slate-200 text-slate-800 rounded-tl-sm w-full";
+                    const parts = text.split(/<article>|<\/article>/);
+                    let html = "";
+                    // Case Details
+                    if(parts[0]) html += `<div class="prose mb-4">${marked.parse(parts[0])}</div>`;
+                    // Documentation
+                    if(parts[1]) {
+                        let cleanHtml = parts[1].replace(/\\\\n/g, '').replace(/\\\\"/g, '"');
+                        if(cleanHtml.includes('&lt;')) {
+                             const txt = document.createElement("textarea");
+                             txt.innerHTML = cleanHtml;
+                             cleanHtml = txt.value;
+                        }
+                        html += `<div class="wiki-content p-5 border border-slate-200 rounded-lg bg-slate-50 my-2">${cleanHtml}</div>`;
                     }
-                    bubble.innerHTML = content;
+                    // Source
+                    if(parts[2]) html += `<div class="prose mt-4 pt-4 border-t border-slate-100">${marked.parse(parts[2])}</div>`;
+                    bubble.innerHTML = html;
                 } else {
-                    // MARKDOWN MODE
                     bubble.className = base + "bg-white border border-slate-200 text-slate-800 rounded-tl-sm prose";
                     bubble.innerHTML = marked.parse(text);
                 }
@@ -235,8 +221,7 @@ HTML_TEMPLATE = r"""
             addMessage('user', text);
             userInput.value = '';
             showTyping("Initializing Agent...");
-            
-            let hasReceivedResponse = false;
+            let hasResponse = false;
 
             try {
                 const response = await fetch('/chat', {
@@ -244,66 +229,37 @@ HTML_TEMPLATE = r"""
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text, session_id: sessionId })
                 });
-                
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
-                
                 while (true) {
                     const { done, value } = await reader.read();
-                    
-                    if (done) {
-                        if(buffer.trim()) {
-                            if(processBuffer(buffer)) hasReceivedResponse = true;
-                        }
-                        break;
-                    }
-                    
+                    if (done) { if(buffer.trim()) if(processBuffer(buffer)) hasResponse=true; break; }
                     buffer += decoder.decode(value, {stream: true});
-                    // FIX: Use correct single-backslash newline splitter
+                    // CORRECT SPLITTER: \n\n (real newlines)
                     let parts = buffer.split('\n\n');
                     buffer = parts.pop();
-                    
-                    parts.forEach(part => {
-                        if(processBuffer(part)) hasReceivedResponse = true;
-                    });
+                    parts.forEach(p => { if(processBuffer(p)) hasResponse=true; });
                 }
-                
-                if (!hasReceivedResponse) {
-                    hideTyping();
-                    addMessage('system', "Error: No response received from server.", 'error');
-                }
-
+                if(!hasResponse) { hideTyping(); addMessage('system', "Error: No response from server.", 'error'); }
             } catch(e) {
                 hideTyping();
                 addMessage('system', "Error: " + e.message);
-            } finally {
-                hideTyping();
-            }
+            } finally { hideTyping(); }
         }
         
         function processBuffer(chunk) {
             const trimmed = chunk.trim();
             if (!trimmed.startsWith('data: ')) return false;
-            
-            const jsonStr = trimmed.substring(6); // Remove "data: "
+            const jsonStr = trimmed.substring(6);
             try {
                 const data = JSON.parse(jsonStr);
-                if (data.type === 'tool') {
-                    showTyping(`Running: ${data.name}...`);
-                } else if (data.type === 'answer') {
-                    hideTyping();
-                    addMessage('ai', data.content);
-                } else if (data.type === 'error') {
-                    addMessage('system', `Error: ${data.content}`, 'tool');
-                }
+                if (data.type === 'tool') showTyping(`Running: ${data.name}...`);
+                else if (data.type === 'answer') { hideTyping(); addMessage('ai', data.content); }
+                else if (data.type === 'error') addMessage('system', `Error: ${data.content}`, 'tool');
                 return true;
-            } catch(e) {
-                console.warn("JSON Parse Error:", e);
-                return false;
-            }
+            } catch(e) { return false; }
         }
-        
         document.getElementById('chat-form').addEventListener('submit', (e) => { e.preventDefault(); const t = userInput.value.trim(); if(t) handleMessage(t); });
     </script>
 </body>
@@ -313,28 +269,14 @@ HTML_TEMPLATE = r"""
 async def startup():
     global mcp_client, agent
     print("\n--- UNIFIED CLIENT STARTING ---")
-    
-    # Retry Logic for Connections
     for name, url in [("Salesforce", SALESFORCE_SERVER_URL), ("Confluence", CONFLUENCE_SERVER_URL)]:
         print(f"🔎 Connecting to {name} ({url})...")
-        connected = False
-        for i in range(5):
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.get(url, timeout=2.0)
-                    print(f"   ✅ {name} Online")
-                    connected = True
-                    break
-            except httpx.TimeoutException:
-                print(f"   ✅ {name} Online (Streaming)")
-                connected = True
-                break
-            except Exception as e:
-                print(f"   ⏳ Waiting for {name}... ({i+1}/5)")
-                await asyncio.sleep(2)
-        
-        if not connected:
-            print(f"   ❌ {name} seems OFFLINE.")
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(url, timeout=2.0)
+                print(f"   ✅ {name} Online")
+        except Exception:
+            print(f"   ⚠️  {name} might be offline (or streaming). Continuing...")
 
     try:
         llm = get_llm()
@@ -342,17 +284,10 @@ async def startup():
             "salesforce": {"transport": "sse", "url": SALESFORCE_SERVER_URL},
             "confluence": {"transport": "sse", "url": CONFLUENCE_SERVER_URL}
         })
-        
-        print("   ✅ Fetching Unified Toolset...")
-        try:
-            mcp_tools = await asyncio.wait_for(mcp_client.get_tools(), timeout=10.0)
-            print(f"   ✅ Loaded {len(mcp_tools)} tools.")
-            memory = MemorySaver()
-            agent = create_react_agent(llm, mcp_tools, checkpointer=memory)
-            print(f"🚀 UNIFIED AGENT READY! http://localhost:{WEB_PORT}")
-        except Exception as e:
-             print(f"   ⚠️ Failed to load tools: {e}")
-
+        mcp_tools = await asyncio.wait_for(mcp_client.get_tools(), timeout=10.0)
+        memory = MemorySaver()
+        agent = create_react_agent(llm, mcp_tools, checkpointer=memory)
+        print(f"🚀 UNIFIED AGENT READY! http://localhost:{WEB_PORT}")
     except Exception as e:
         print(f"❌ Startup Error: {traceback.format_exc()}")
 
