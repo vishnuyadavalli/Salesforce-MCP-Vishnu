@@ -2,7 +2,7 @@ import asyncio
 import httpx
 
 async def check_server():
-    url = "http://localhost:8000/sse"
+    url = "http://localhost:8013/sse"  # FIX: Correct Port
     print(f"--- TESTING CONFLUENCE SERVER CONNECTION ---")
     print(f"Target: {url}")
     
@@ -16,7 +16,7 @@ async def check_server():
             print("❌ Connection Failed: Connection Refused.")
             print("   - Is the server running?")
             print("   - Did it start on Port 8013? (Check the server terminal logs)")
-            print("   - Try running: 'python3 confluence_app --port 8013'")
+            print("   - Try running: 'python3 confluence_app'")
         except Exception as e:
             print(f"❌ Unexpected Error: {e}")
 

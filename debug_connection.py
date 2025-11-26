@@ -2,7 +2,7 @@ import asyncio
 import httpx
 
 async def check_server():
-    url = "http://localhost:8012/sse"
+    url = "http://localhost:8000/sse"
     print(f"Testing connection to: {url}")
     
     async with httpx.AsyncClient() as client:
@@ -15,7 +15,7 @@ async def check_server():
         except httpx.ConnectError:
             print("❌ Connection Failed: Could not connect to the server.")
             print("   - Is the server running in a separate terminal?")
-            print("   - Is it running on port 8012?")
+            print("   - Is it running on port 8000?")
         except Exception as e:
             print(f"❌ Unexpected Error: {e}")
 
